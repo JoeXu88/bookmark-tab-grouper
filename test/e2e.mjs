@@ -190,6 +190,7 @@ async function resetSettings() {
         docGroupEnabled: true,
         docGroupTitle: '文档',
         docGroupScope: 'any',
+        restoreOnHistoryNav: true,
       },
     });
     await new Promise((r) => setTimeout(r, 100));
@@ -833,6 +834,114 @@ try {
     check(groupOf(s, d1.tabId)?.title === '文档' && groupOf(s, d1.tabId)?.id === groupOf(s, d2.tabId)?.id, 'd1、d2 进入同一文档组', s.groups);
     check(!groupOf(s, n.tabId), '普通网页不动', groupOf(s, n.tabId));
     check(groupOf(s, u.tabId)?.id === mine, '用户组里的文档不动', groupOf(s, u.tabId));
+    await closeWindow(w);
+  });
+
+  // ---------- 前进 / 后退恢复分组 ----------
+  const back = (page) => page.goBack({ waitUntil: 'load', timeout: 5000 }).catch(() => {});
+  const fwd = (page) => page.goForward({ waitUntil: 'load', timeout: 5000 }).catch(() => {});
+  const curUrl = (s, tabId) => s.tabs.find((t) => t.id === tabId)?.url || '';
+
+  await scenario('后退/前进：文档组 → 同标签书签打开 Work → 后退回文档组 → 前进回 Work → 再后退到未分组页', async () => {
+    const w = await newWindow();
+    const a = await newTab(w); // 初始页未分组
+    await navigate(a.page, U.workDoc);
+    let s = await waitFor(w, (s) => groupOf(s, a.tabId)?.title === '文档');
+    check(groupOf(s, a.tabId)?.title === '文档', '1. 文档 → 文档组', groupOf(s, a.tabId));
+    await navigate(a.page, U.w1);
+    s = await waitFor(w, (s) => groupOf(s, a.tabId)?.title === 'Work');
+    check(groupOf(s, a.tabId)?.title === 'Work', '2. Work 书签 → Work 组', groupOf(s, a.tabId));
+    await back(a.page);
+    s = await waitFor(w, (s) => groupOf(s, a.tabId)?.title === '文档');
+    check(curUrl(s, a.tabId).includes('/docx/'), '3. 已后退到文档页', curUrl(s, a.tabId));
+    check(groupOf(s, a.tabId)?.title === '文档', '3. 后退 → 回到文档组（用户反馈的问题）', groupOf(s, a.tabId));
+    await fwd(a.page);
+    s = await waitFor(w, (s) => groupOf(s, a.tabId)?.title === 'Work');
+    check(groupOf(s, a.tabId)?.title === 'Work', '4. 前进 → 回到 Work 组', groupOf(s, a.tabId));
+    await back(a.page);
+    await waitFor(w, (s) => groupOf(s, a.tabId)?.title === '文档');
+    await back(a.page);
+    s = await waitFor(w, (s) => !groupOf(s, a.tabId) && curUrl(s, a.tabId).includes('/blank'));
+    check(curUrl(s, a.tabId).includes('/blank'), '5. 已后退到初始页', curUrl(s, a.tabId));
+    check(!groupOf(s, a.tabId), '5. 初始页原来未分组 → 恢复为未分组', groupOf(s, a.tabId));
+    await closeWindow(w);
+  });
+
+  await scenario('后退：页面原来在用户自建组 → 书签打开被移到 Work → 后退放回用户组', async () => {
+    const w = await newWindow();
+    const a = await newTab(w);
+    const keep = await newTab(w);
+    const mine = await ev(async (ids) => {
+      const id = await chrome.tabs.group({ tabIds: ids });
+      await chrome.tabGroups.update(id, { title: 'Mine' });
+      return id;
+    }, [a.tabId, keep.tabId]);
+    await a.page.bringToFront();
+    await navigate(a.page, U.w1);
+    let s = await waitFor(w, (s) => groupOf(s, a.tabId)?.title === 'Work');
+    check(groupOf(s, a.tabId)?.title === 'Work', '书签打开 → 移到 Work', groupOf(s, a.tabId));
+    await back(a.page);
+    s = await waitFor(w, (s) => groupOf(s, a.tabId)?.id === mine);
+    check(groupOf(s, a.tabId)?.id === mine, '后退 → 回到用户的 Mine 组', groupOf(s, a.tabId));
+    await closeWindow(w);
+  });
+
+  await scenario('后退：用户手动调整过分组 → 不覆盖用户的选择', async () => {
+    const w = await newWindow();
+    const a = await newTab(w);
+    await navigate(a.page, U.workDoc);
+    await waitFor(w, (s) => groupOf(s, a.tabId)?.title === '文档');
+    await navigate(a.page, U.w1);
+    await waitFor(w, (s) => groupOf(s, a.tabId)?.title === 'Work');
+    const mine = await ev(async (tabId) => {
+      const id = await chrome.tabs.group({ tabIds: tabId });
+      await chrome.tabGroups.update(id, { title: '我的' });
+      return id;
+    }, a.tabId);
+    await back(a.page);
+    await sleep(800);
+    let s = await state(w);
+    check(curUrl(s, a.tabId).includes('/docx/'), '已后退到文档页', curUrl(s, a.tabId));
+    check(groupOf(s, a.tabId)?.id === mine, '在用户自己的组里 → 不动', groupOf(s, a.tabId));
+    await ev((id) => chrome.tabs.ungroup(id), a.tabId);
+    await fwd(a.page);
+    await sleep(800);
+    s = await state(w);
+    check(!groupOf(s, a.tabId), '用户手动移出过 → 前进也不自动归组', groupOf(s, a.tabId));
+    await closeWindow(w);
+  });
+
+  await scenario('后退/前进：飞书站内切换（pushState）→ 后退恢复未分组 → 前进回文档组', async () => {
+    const w = await newWindow();
+    const a = await newTab(w);
+    await navigate(a.page, `${FS}/next/messenger`, 'typed');
+    await sleep(400);
+    await a.page.click('#spa');
+    let s = await waitFor(w, (s) => groupOf(s, a.tabId)?.title === '文档');
+    check(groupOf(s, a.tabId)?.title === '文档', '站内切到文档 → 文档组', groupOf(s, a.tabId));
+    await a.page.evaluate(() => history.back());
+    s = await waitFor(w, (s) => !groupOf(s, a.tabId));
+    check(curUrl(s, a.tabId).includes('/next/messenger'), '已后退到消息页', curUrl(s, a.tabId));
+    check(!groupOf(s, a.tabId), '后退 → 消息页原来未分组 → 移出文档组', groupOf(s, a.tabId));
+    await a.page.evaluate(() => history.forward());
+    s = await waitFor(w, (s) => groupOf(s, a.tabId)?.title === '文档');
+    check(groupOf(s, a.tabId)?.title === '文档', '前进 → 回到文档组', groupOf(s, a.tabId));
+    await closeWindow(w);
+  });
+
+  await scenario('设置关闭「前进/后退恢复分组」→ 后退保持当前组（旧行为）', async () => {
+    const w = await newWindow();
+    await setSettings({ restoreOnHistoryNav: false });
+    const a = await newTab(w);
+    await navigate(a.page, U.workDoc);
+    await waitFor(w, (s) => groupOf(s, a.tabId)?.title === '文档');
+    await navigate(a.page, U.w1);
+    await waitFor(w, (s) => groupOf(s, a.tabId)?.title === 'Work');
+    await back(a.page);
+    await sleep(800);
+    const s = await state(w);
+    check(curUrl(s, a.tabId).includes('/docx/'), '已后退到文档页', curUrl(s, a.tabId));
+    check(groupOf(s, a.tabId)?.title === 'Work', '关闭后 → 保持 Work 组', groupOf(s, a.tabId));
     await closeWindow(w);
   });
 

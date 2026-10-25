@@ -7,10 +7,13 @@ import {
   buildCandidateUrls,
   colorForFolder,
   colorForTarget,
+  decideHistoryRestore,
+  historyKey,
   isActiveMainFrame,
   isAutoDocCandidate,
   isBookmarkOpen,
   isDocUrl,
+  isHistoryNav,
   looseUrlKey,
   mayBeBookmarkOpen,
   normalizeSettings,
@@ -19,6 +22,7 @@ import {
   resolveDocTarget,
   resolveGroupTarget,
   shortUrlLabel,
+  snapshotGroupState,
   titleForChain,
   usedDuringNavigation,
 } from '../extension/lib/core.js';
@@ -217,4 +221,44 @@ test('shortUrlLabel: 主机 + 前两段路径', () => {
   assert.equal(shortUrlLabel('https://a.feishu.cn/'), 'a.feishu.cn/');
   assert.ok(shortUrlLabel('https://a.feishu.cn/' + 'x'.repeat(100)).length <= 60);
   assert.equal(shortUrlLabel('bad'), 'bad');
+});
+
+test('isHistoryNav / historyKey', () => {
+  assert.ok(isHistoryNav({ transitionType: 'auto_bookmark', transitionQualifiers: ['forward_back'] }));
+  assert.ok(isHistoryNav({ transitionType: 'typed', transitionQualifiers: ['forward_back', 'from_address_bar'] }));
+  assert.ok(!isHistoryNav({ transitionType: 'auto_bookmark', transitionQualifiers: [] }));
+  assert.ok(!isHistoryNav(null));
+  assert.equal(historyKey('https://a.com/p?x=1#h'), 'https://a.com/p?x=1');
+  assert.notEqual(historyKey('https://a.com/p?x=1'), historyKey('https://a.com/p?x=2'));
+  assert.equal(historyKey('bad'), 'bad');
+});
+
+test('snapshotGroupState: 未分组 / 本扩展组 / 用户组', () => {
+  assert.deepEqual(snapshotGroupState(-1), { g: 'none' });
+  assert.deepEqual(snapshotGroupState(5, { groupId: 5, folderId: '__docs__', title: '文档' }), {
+    g: 'ext',
+    folderId: '__docs__',
+    title: '文档',
+  });
+  assert.deepEqual(snapshotGroupState(7, undefined), { g: 'user', groupId: 7 });
+});
+
+test('decideHistoryRestore: 只纠正本扩展造成的分组', () => {
+  const ext = { g: 'ext', folderId: '__docs__', title: '文档' };
+  const none = { g: 'none' };
+  const user = { g: 'user', groupId: 9 };
+  const inOwned = { groupId: 3, owned: true, dismissed: false, userGroupAlive: false };
+  const ungrouped = { groupId: -1, owned: false, dismissed: false, userGroupAlive: false };
+  assert.equal(decideHistoryRestore(ext, inOwned), 'to-ext');
+  assert.equal(decideHistoryRestore(none, inOwned), 'ungroup');
+  assert.equal(decideHistoryRestore(user, { ...inOwned, userGroupAlive: true }), 'to-user');
+  assert.equal(decideHistoryRestore(user, inOwned), 'ungroup');
+  assert.equal(decideHistoryRestore(ext, { groupId: 4, owned: false }), 'skip-user-group');
+  assert.equal(decideHistoryRestore(ext, ungrouped), 'to-ext');
+  assert.equal(decideHistoryRestore(ext, { ...ungrouped, dismissed: true }), 'skip-dismissed');
+  assert.equal(decideHistoryRestore(none, ungrouped), 'none');
+  assert.equal(decideHistoryRestore(user, { ...ungrouped, userGroupAlive: true }), 'none');
+  assert.equal(decideHistoryRestore(undefined, inOwned), 'no-history');
+  assert.equal(normalizeSettings({}).restoreOnHistoryNav, true);
+  assert.equal(normalizeSettings({ restoreOnHistoryNav: false }).restoreOnHistoryNav, false);
 });

@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   docGroupEnabled: true, // 飞书文档 / 表格 / 多维表格等统一归入一个组（优先于按文件夹分组）
   docGroupTitle: DEFAULT_DOC_GROUP_TITLE, // 该组的名字
   docGroupScope: 'any', // 'any' 任何方式打开的飞书文档都归组 | 'bookmark' 仅从书签打开时归组
+  restoreOnHistoryNav: true, // 前进 / 后退时，把标签放回该页面当时所在的组
 });
 
 const ENUMS = {
@@ -253,4 +254,51 @@ export function colorForFolder(folderId) {
 
 export function mapKey(windowId, folderId) {
   return `${windowId}:${folderId}`;
+}
+
+// ---------- 前进 / 后退时恢复分组 ----------
+export const HISTORY_PER_TAB = 30; // 每个标签最多记住多少个页面的分组状态
+
+/** 是否为前进 / 后退导航 */
+export function isHistoryNav(d) {
+  return !!d && (d.transitionQualifiers || []).includes('forward_back');
+}
+
+/** 历史记录的键：去掉 #hash，其余保持原样 */
+export function historyKey(url) {
+  try {
+    const u = new URL(url);
+    u.hash = '';
+    return u.href;
+  } catch {
+    return String(url || '');
+  }
+}
+
+/**
+ * 页面分组状态的快照
+ * @param {number} groupId 标签当前 groupId（-1 表示未分组）
+ * @param {{groupId:number, folderId:string, title:string}|undefined} ownedEntry 若该组由本扩展创建，对应的映射条目
+ */
+export function snapshotGroupState(groupId, ownedEntry) {
+  if (groupId === -1 || groupId == null) return { g: 'none' };
+  if (ownedEntry) return { g: 'ext', folderId: ownedEntry.folderId, title: ownedEntry.title };
+  return { g: 'user', groupId };
+}
+
+/**
+ * 前进 / 后退回到某个页面时，决定怎么处理分组。
+ * 原则：每个页面记住自己当时所在的组；但只纠正“本扩展造成的”分组，用户自己的整理不动。
+ * @param want 该页面记录的状态（snapshotGroupState 的结果），没有记录则为 undefined
+ * @param cur  { groupId, owned: 当前组是否本扩展创建, dismissed: 用户是否手动移出过, userGroupAlive: want 指向的用户组是否还在同一窗口 }
+ * @returns 'no-history' | 'skip-user-group' | 'skip-dismissed' | 'to-ext' | 'to-user' | 'ungroup' | 'none'
+ */
+export function decideHistoryRestore(want, cur) {
+  if (!want) return 'no-history';
+  if (cur.groupId !== -1 && !cur.owned) return 'skip-user-group'; // 当前在用户自己的组里：不动
+  if (cur.groupId === -1 && cur.dismissed) return 'skip-dismissed'; // 用户手动移出过：不动
+  if (want.g === 'ext') return 'to-ext'; // 放回本扩展的组（不存在则重建）
+  if (!cur.owned) return 'none'; // 当前未分组、目标也不是本扩展的组：不动
+  if (want.g === 'user' && cur.userGroupAlive) return 'to-user'; // 放回用户原来的组
+  return 'ungroup'; // 该页面当时未分组：移出本扩展的组
 }

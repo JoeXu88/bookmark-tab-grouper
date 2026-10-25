@@ -7,11 +7,14 @@ const ACTION_TEXT = {
   'skip-root': '根目录书签，未分组',
   'skip-user-group': '已在其他组，未移动',
   swept: '整理到',
+  restored: '恢复到',
+  'restored-ungroup': '恢复为未分组',
 };
 
 const VIA_TEXT = {
   'recent-use': '（书签管理器）',
   auto: '（非书签）',
+  history: '（前进/后退）',
 };
 
 const $ = (id) => document.getElementById(id);

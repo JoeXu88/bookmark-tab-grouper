@@ -1,14 +1,18 @@
 import {
   DEFAULT_SETTINGS,
   DOC_GROUP_ID,
+  HISTORY_PER_TAB,
   ROOT_NODE_ID,
   buildCandidateUrls,
   colorForTarget,
+  decideHistoryRestore,
   docGroupTarget,
+  historyKey,
   isActiveMainFrame,
   isAutoDocCandidate,
   isBookmarkOpen,
   isDocUrl,
+  isHistoryNav,
   looseUrlKey,
   mapKey,
   mayBeBookmarkOpen,
@@ -18,6 +22,7 @@ import {
   resolveDocTarget,
   resolveGroupTarget,
   shortUrlLabel,
+  snapshotGroupState,
   titleForChain,
   usedDuringNavigation,
 } from './lib/core.js';
@@ -355,6 +360,107 @@ async function sweepDocTabs() {
   return { grouped };
 }
 
+// ---------- 前进 / 后退：每个页面记住当时所在的组 ----------
+// tabHistory: { [tabId]: { [historyKey(url)]: snapshot } }，存在 storage.session
+// tabUrl:     tabId -> 当前页面 URL（内存；SW 重启后从 chrome.tabs 补齐）
+const tabUrl = new Map();
+
+async function getTabHistory() {
+  const { tabHistory } = await chrome.storage.session.get('tabHistory');
+  return tabHistory || {};
+}
+
+/** 记录某标签上某页面当前所在的组 */
+async function rememberPageGroup(tabId, url, groupId, map) {
+  if (!url || !/^https?:/.test(url)) return;
+  map = map || (await getGroupMap());
+  const owned = Object.values(map).find((v) => v.groupId === groupId);
+  const all = await getTabHistory();
+  const h = all[tabId] || {};
+  const key = historyKey(url);
+  const snap = snapshotGroupState(groupId, owned);
+  if (JSON.stringify(h[key]) === JSON.stringify(snap)) return; // 没变化不写，减少单页应用频繁 pushState 时的写入
+  delete h[key]; // 重新插入，保持“最近使用”在最后
+  h[key] = snap;
+  const keys = Object.keys(h);
+  for (const k of keys.slice(0, Math.max(0, keys.length - HISTORY_PER_TAB))) delete h[k];
+  all[tabId] = h;
+  await chrome.storage.session.set({ tabHistory: all });
+}
+
+/**
+ * 离开当前页面前，记下它此刻的分组（用户可能已手动调整过）。
+ * leavingUrl 在事件里同步取得；SW 刚重启不知道时，退回用 tab.url（但不能是正要去的地址）。
+ */
+async function rememberLeavingPage(tabId, leavingUrl, targetUrl) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) return;
+  let url = leavingUrl;
+  if (!url) {
+    url = tab.url;
+    if (!url || historyKey(url) === historyKey(targetUrl)) return;
+  }
+  await rememberPageGroup(tabId, url, tab.groupId);
+}
+
+/** 前进 / 后退回到某页面：恢复它当时所在的组 */
+async function restoreOnHistoryNav(tabId, url) {
+  const settings = await getSettings();
+  if (!settings.enabled || !settings.restoreOnHistoryNav) return { action: 'disabled' };
+  const want = (await getTabHistory())[tabId]?.[historyKey(url)];
+  const { tab, skip } = await getGroupableTab(tabId);
+  if (skip) return { action: skip };
+  const map = await getGroupMap();
+  const placed = await getPlacedTabs();
+  let userGroupAlive = false;
+  if (want?.g === 'user') {
+    const g = await getGroup(want.groupId);
+    userGroupAlive = !!g && g.windowId === tab.windowId;
+  }
+  const decision = decideHistoryRestore(want, {
+    groupId: tab.groupId,
+    owned: tab.groupId !== -1 && isOwnedGroup(map, tab.groupId),
+    dismissed: tabId in placed,
+    userGroupAlive,
+  });
+
+  let result = { action: decision };
+  if (decision === 'to-ext') {
+    const target = { folderId: want.folderId, title: want.title, kind: want.folderId === DOC_GROUP_ID ? 'docs' : 'folder' };
+    if (target.kind === 'docs') {
+      Object.assign(target, docGroupTarget(settings));
+    } else if (settings.syncTitleOnRename) {
+      // 文件夹可能已改名：取当前名字
+      try {
+        const chain = await getAncestors(want.folderId);
+        if (chain.length) target.title = titleForChain(chain, settings.titleStyle);
+      } catch {}
+    }
+    const groupId = await findGroupFor(tab.windowId, target, map);
+    if (groupId != null && tab.groupId === groupId) {
+      result = { action: 'already-in-group', groupId };
+    } else {
+      result = await moveToTarget(tab, target, groupId, settings, map);
+      placed[tabId] = result.groupId;
+    }
+    result.title = target.title;
+  } else if (decision === 'to-user') {
+    await withRetry(() => chrome.tabs.group({ tabIds: tabId, groupId: want.groupId }));
+    delete placed[tabId];
+  } else if (decision === 'ungroup') {
+    await withRetry(() => chrome.tabs.ungroup(tabId));
+    delete placed[tabId];
+  }
+  if (['created', 'joined', 'to-user', 'ungroup'].includes(result.action)) {
+    await setGroupMap(map);
+    await setPlacedTabs(placed);
+    const label = shortUrlLabel(url);
+    const group = result.title || (decision === 'to-user' ? (await getGroup(want.groupId))?.title : null);
+    await addLog({ action: decision === 'ungroup' ? 'restored-ungroup' : 'restored', group, bookmark: label, via: 'history' });
+  }
+  return result;
+}
+
 /** 书签文件夹改名/移动或设置变化后，同步标签组标题（仅限用户未手动改过的组） */
 async function syncGroupTitles() {
   const settings = await getSettings();
@@ -400,6 +506,11 @@ chrome.webNavigation.onBeforeNavigate.addListener((d) => {
   const urls = fresh ? prev.urls : [];
   urls.push(d.url);
   pendingNav.set(d.tabId, { urls, at: Date.now(), startedAt: fresh ? prev.startedAt : Date.now() });
+  // 记下即将离开的页面此刻所在的组（只在一次导航开始时记一次，重定向中途不重复记）
+  if (!fresh) {
+    const leavingUrl = tabUrl.get(d.tabId); // 同步取，避免排队期间被新页面覆盖
+    enqueue(() => rememberLeavingPage(d.tabId, leavingUrl, d.url));
+  }
 });
 
 chrome.webNavigation.onErrorOccurred.addListener((d) => {
@@ -412,7 +523,11 @@ chrome.webNavigation.onCommitted.addListener((d) => {
   pendingNav.delete(d.tabId);
   const fresh = pending && Date.now() - pending.at < PENDING_TTL_MS;
   const candidates = buildCandidateUrls(fresh ? pending.urls : [], d.url);
-  if (isBookmarkOpen(d)) {
+  tabUrl.set(d.tabId, d.url);
+  if (isHistoryNav(d)) {
+    // 前进 / 后退：恢复该页面当时的分组，不按书签 / 文档规则重新归组
+    enqueue(() => restoreOnHistoryNav(d.tabId, d.url));
+  } else if (isBookmarkOpen(d)) {
     enqueue(() => processBookmarkNavigation(d.tabId, candidates, { via: 'transition' }));
   } else if (mayBeBookmarkOpen(d)) {
     // 先按书签管理器路径识别；不是书签时内部会回落到文档自动归组
@@ -426,13 +541,31 @@ chrome.webNavigation.onCommitted.addListener((d) => {
     // 登录后跳回文档（client_redirect）、表单提交后跳转等
     enqueue(() => processAutoDocNavigation(d.tabId, candidates));
   }
+  // 处理完后记下新页面所在的组
+  enqueue(() => rememberCurrentPage(d.tabId, d.url));
 });
 
 // 飞书网页是单页应用：站内切换到文档时不触发 onCommitted，只触发 onHistoryStateUpdated
 chrome.webNavigation.onHistoryStateUpdated.addListener((d) => {
-  if (!isActiveMainFrame(d) || !isAutoDocCandidate(d) || !isDocUrl(d.url)) return;
-  enqueue(() => processAutoDocNavigation(d.tabId, [d.url]));
+  if (!isActiveMainFrame(d)) return;
+  const prevUrl = tabUrl.get(d.tabId);
+  tabUrl.set(d.tabId, d.url);
+  enqueue(async () => {
+    // pushState / 后退前，先记下离开的那个“页面”的分组
+    if (prevUrl && historyKey(prevUrl) !== historyKey(d.url)) {
+      const tab = await chrome.tabs.get(d.tabId).catch(() => null);
+      if (tab) await rememberPageGroup(d.tabId, prevUrl, tab.groupId);
+    }
+    if (isHistoryNav(d)) await restoreOnHistoryNav(d.tabId, d.url);
+    else if (isAutoDocCandidate(d) && isDocUrl(d.url)) await processAutoDocNavigation(d.tabId, [d.url]);
+    await rememberCurrentPage(d.tabId, d.url);
+  });
 });
+
+async function rememberCurrentPage(tabId, url) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab) await rememberPageGroup(tabId, url, tab.groupId);
+}
 
 chrome.webNavigation.onTabReplaced.addListener(({ replacedTabId, tabId }) => {
   const p = pendingNav.get(replacedTabId);
@@ -447,16 +580,28 @@ chrome.webNavigation.onTabReplaced.addListener(({ replacedTabId, tabId }) => {
       delete placed[replacedTabId];
       await setPlacedTabs(placed);
     }
+    const all = await getTabHistory();
+    if (replacedTabId in all) {
+      all[tabId] = all[replacedTabId];
+      delete all[replacedTabId];
+      await chrome.storage.session.set({ tabHistory: all });
+    }
   });
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   pendingNav.delete(tabId);
+  tabUrl.delete(tabId);
   enqueue(async () => {
     const placed = await getPlacedTabs();
     if (tabId in placed) {
       delete placed[tabId];
       await setPlacedTabs(placed);
+    }
+    const all = await getTabHistory();
+    if (tabId in all) {
+      delete all[tabId];
+      await chrome.storage.session.set({ tabHistory: all });
     }
   });
 });
@@ -519,10 +664,12 @@ chrome.runtime.onInstalled.addListener(async () => {
 globalThis.__btg = {
   processBookmarkNavigation,
   processAutoDocNavigation,
+  restoreOnHistoryNav,
   sweepDocTabs,
   syncGroupTitles,
   getGroupMap,
   getPlacedTabs,
+  getTabHistory,
   getSettings,
   idle: () => queue,
 };
