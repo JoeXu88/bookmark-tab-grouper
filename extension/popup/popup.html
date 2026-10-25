@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>书签标签自动分组</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>书签标签自动分组</h1>
+      <label class="switch" title="启用 / 停用">
+        <input type="checkbox" id="enabled" />
+        <span class="slider"></span>
+      </label>
+    </header>
+
+    <section id="settings">
+      <div class="row">
+        <span class="label">分组依据</span>
+        <select id="groupBy">
+          <option value="parent">所在文件夹</option>
+          <option value="top">顶层文件夹</option>
+        </select>
+      </div>
+      <div class="row">
+        <span class="label">组名格式</span>
+        <select id="titleStyle">
+          <option value="name">文件夹名</option>
+          <option value="path">完整路径（A / B）</option>
+        </select>
+      </div>
+      <div class="row">
+        <span class="label">根目录下的书签</span>
+        <select id="rootBookmarks">
+          <option value="skip">不分组</option>
+          <option value="group">按根目录分组</option>
+        </select>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="moveFromOtherGroups" />
+        标签已在其他标签组时也移动
+      </label>
+      <label class="check">
+        <input type="checkbox" id="colorByFolder" />
+        每个文件夹使用固定颜色
+      </label>
+      <label class="check">
+        <input type="checkbox" id="syncTitleOnRename" />
+        文件夹改名后同步标签组名
+      </label>
+    </section>
+
+    <section id="rules">
+      <h2>规则分组（优先于文件夹）</h2>
+      <label class="check">
+        <input type="checkbox" id="docGroupEnabled" />
+        飞书文档 / 表格 / 多维表格等统一归入
+      </label>
+      <div class="row indent">
+        <span class="label">组名</span>
+        <input type="text" id="docGroupTitle" maxlength="40" placeholder="文档" />
+      </div>
+      <div class="row indent">
+        <span class="label">生效范围</span>
+        <select id="docGroupScope">
+          <option value="any">任何方式打开</option>
+          <option value="bookmark">仅书签打开</option>
+        </select>
+      </div>
+      <div class="row indent">
+        <span class="label">已打开的文档</span>
+        <button type="button" id="sweepDocs">立即整理</button>
+      </div>
+      <p class="hint">识别 feishu.cn、larkoffice.com、larksuite.com 下的 docx、doc、wiki、sheets、base、slides、mindnote、file、drive 等链接。手动移出组的标签不会被再次自动归组。</p>
+    </section>
+
+    <section>
+      <h2>最近记录</h2>
+      <ul id="logs"><li class="empty">暂无记录</li></ul>
+    </section>
+
+    <footer id="status"></footer>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

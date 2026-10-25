@@ -1,0 +1,18 @@
+{
+  "name": "bookmark-tab-grouper",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Chrome 扩展：从书签打开的标签页按书签文件夹自动归入同名标签组",
+  "type": "module",
+  "scripts": {
+    "icons": "node scripts/make-icons.mjs",
+    "test:unit": "node --test test/unit.test.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "test": "npm run test:unit && npm run test:e2e",
+    "shot": "node test/popup-shot.mjs popup-screenshot.png",
+    "pack": "cd extension && zip -r -X ../bookmark-tab-grouper.zip . -x \".*\""
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.16.0"
+  }
+}

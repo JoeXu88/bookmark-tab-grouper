@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "书签标签自动分组",
+  "short_name": "Bookmark Grouper",
+  "version": "1.2.0",
+  "description": "从书签打开的标签页，按书签所在文件夹自动归入同名标签组。",
+  "minimum_chrome_version": "116",
+  "permissions": ["bookmarks", "tabs", "tabGroups", "webNavigation", "storage"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "书签标签自动分组",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
